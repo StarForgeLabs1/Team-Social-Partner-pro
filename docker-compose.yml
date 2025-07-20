@@ -1,0 +1,162 @@
+version: '3.8'
+
+services:
+  # Main Database
+  postgres:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+
+  # Cache and Queue
+  redis:
+    image: redis:7-alpine
+    restart: always
+    command: redis-server --appendonly yes --maxmemory 2gb
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+
+  # Account Data Storage (for isolated profiles)
+  mongodb:
+    image: mongo:6
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: admin
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_PASSWORD}
+    volumes:
+      - mongodb_data:/data/db
+    ports:
+      - "27017:27017"
+
+  # Main Backend Service
+  backend:
+    build: ./backend
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+      - mongodb
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+      - ./uploads:/app/uploads # For temporary file storage
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  # Frontend Application
+  frontend:
+    build: ./frontend
+    restart: always
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules # Keep node_modules outside the bind mount to prevent host synchronization issues
+
+  # Account Management Service (for isolation)
+  account-manager:
+    build: ./account-manager
+    restart: always
+    depends_on:
+      - mongodb
+      - redis
+    env_file:
+      - .env
+    volumes:
+      - ./account-manager:/app
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw # For browser automation
+    # Remove `command: python main.py` as it will be orchestrated by a separate entrypoint or the backend service.
+
+  # AI Content Generation Service
+  ai-services:
+    build: ./ai-services
+    restart: always
+    depends_on:
+      - redis
+    env_file:
+      - .env
+    volumes:
+      - ./ai-services:/app
+      - ./uploads:/app/uploads # For temporary file storage
+    ports:
+      - "8001:8001" # Expose if it has its own API
+
+  # TikTok Automation Service
+  tiktok-automation:
+    build: ./tiktok-automation
+    restart: always
+    depends_on:
+      - mongodb
+      - redis
+    env_file:
+      - .env
+    volumes:
+      - ./tiktok-automation:/app
+      - ./uploads:/app/uploads # For temporary file storage
+    privileged: true # Might be needed for browser automation in this container
+
+  # Security Monitoring Service
+  security-monitor:
+    build: ./security-monitor
+    restart: always
+    depends_on:
+      - mongodb
+      - redis
+    env_file:
+      - .env
+    volumes:
+      - ./security-monitor:/app
+
+  # Celery Worker for background tasks
+  celery-worker:
+    build: ./backend # Reusing backend image as it has required deps
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    command: celery -A app.core.celery_app worker --loglevel=info --concurrency=4
+
+  # Celery Beat for scheduled tasks
+  celery-beat:
+    build: ./backend # Reusing backend image
+    restart: always
+    depends_on:
+      - postgres
+      - redis
+    env_file:
+      - .env
+    volumes:
+      - ./backend:/app
+    command: celery -A app.core.celery_app beat --loglevel=info
+
+  # Proxy Manager (Example, can be a dedicated service or integrated)
+  proxy-manager:
+    image: luminati/luminati-proxy # Example proxy image
+    restart: always
+    ports:
+      - "22225:22225"
+    environment:
+      - PROXY_COUNT=100
+      - ROTATION_ENABLED=true
+
+volumes:
+  postgres_data:
+  redis_data:
+  mongodb_data:
